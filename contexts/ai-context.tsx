@@ -24,6 +24,8 @@ export interface AIConfig {
   activePromptTemplate: string
   promptTemplates: PromptTemplate[]
   rememberSettings: boolean
+  flowiseEndpoint: string
+  flowiseChatflowId: string
 }
 
 interface AIContextType {
@@ -107,6 +109,8 @@ const defaultConfig: AIConfig = {
   activePromptTemplate: "default-pentest",
   promptTemplates: defaultPromptTemplates,
   rememberSettings: false,
+  flowiseEndpoint: "http://localhost:3000",
+  flowiseChatflowId: "",
 }
 
 const AIContext = createContext<AIContextType | undefined>(undefined)
@@ -162,6 +166,52 @@ export function AIProvider({ children }: { children: ReactNode }) {
   }
 
   const testConnection = async () => {
+    if (config.provider === "flowise") {
+      if (!config.flowiseEndpoint || !config.flowiseChatflowId) {
+        toast({
+          title: "Missing Configuration",
+          description: "Please enter both Flowise endpoint and Chatflow ID",
+          variant: "destructive",
+        })
+        return false
+      }
+
+      toast({
+        title: "Testing Flowise Connection",
+        description: "Please wait while we verify the connection...",
+      })
+
+      try {
+        const response = await fetch(`${config.flowiseEndpoint}/api/v1/prediction/${config.flowiseChatflowId}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ question: "Test connection" }),
+        })
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
+
+        const result = await response.json()
+        
+        toast({
+          title: "Connection Successful",
+          description: "Successfully connected to Flowise",
+        })
+        return true
+      } catch (error) {
+        toast({
+          title: "Connection Failed",
+          description: error instanceof Error ? error.message : "Failed to connect to Flowise",
+          variant: "destructive",
+        })
+        return false
+      }
+    }
+
+    // Existing API key check for other providers
     if (!config.apiKey) {
       toast({
         title: "API Key Required",

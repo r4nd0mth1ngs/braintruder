@@ -282,6 +282,33 @@ export default function AIConfig({ open, onOpenChange }: AIConfigProps) {
                               Enter the exact model name you want to use (e.g., gpt-4o, gpt-4-turbo, gpt-3.5-turbo)
                             </p>
                           </div>
+                        ) : config.provider === "flowise" ? (
+                          <div className="space-y-4">
+                            <div className="space-y-2">
+                              <Label htmlFor="flowise-endpoint" className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                                Flowise Endpoint
+                              </Label>
+                              <Input
+                                id="flowise-endpoint"
+                                placeholder="http://localhost:3000"
+                                className="bg-white/60 dark:bg-slate-800/60 border-slate-200/60 dark:border-slate-700/60 rounded-2xl h-12"
+                                value={config.flowiseEndpoint}
+                                onChange={(e) => updateConfig({ flowiseEndpoint: e.target.value })}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="flowise-chatflow" className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                                Chatflow ID
+                              </Label>
+                              <Input
+                                id="flowise-chatflow"
+                                placeholder="Enter your Flowise chatflow ID"
+                                className="bg-white/60 dark:bg-slate-800/60 border-slate-200/60 dark:border-slate-700/60 rounded-2xl h-12"
+                                value={config.flowiseChatflowId}
+                                onChange={(e) => updateConfig({ flowiseChatflowId: e.target.value })}
+                              />
+                            </div>
+                          </div>
                         ) : (
                           <Select
                             value={config.model}
@@ -300,38 +327,40 @@ export default function AIConfig({ open, onOpenChange }: AIConfigProps) {
                         )}
                       </div>
 
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <Label htmlFor="api-key" className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                            API Key
-                          </Label>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 rounded-xl"
-                            onClick={() => setShowApiKey(!showApiKey)}
-                          >
-                            {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                          </Button>
+                      {config.provider !== "flowise" && (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <Label htmlFor="api-key" className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                              API Key
+                            </Label>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 rounded-xl"
+                              onClick={() => setShowApiKey(!showApiKey)}
+                            >
+                              {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </Button>
+                          </div>
+                          <Input
+                            id="api-key"
+                            type={showApiKey ? "text" : "password"}
+                            placeholder={`Enter your ${config.provider} API key`}
+                            className="bg-white/60 dark:bg-slate-800/60 border-slate-200/60 dark:border-slate-700/60 rounded-2xl h-12"
+                            value={config.apiKey}
+                            onChange={(e) => updateConfig({ apiKey: e.target.value })}
+                          />
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Your API key is used to connect to the AI service. It will not be shared or stored unless you
+                            enable "Remember Settings".
+                          </p>
                         </div>
-                        <Input
-                          id="api-key"
-                          type={showApiKey ? "text" : "password"}
-                          placeholder={`Enter your ${config.provider} API key`}
-                          className="bg-white/60 dark:bg-slate-800/60 border-slate-200/60 dark:border-slate-700/60 rounded-2xl h-12"
-                          value={config.apiKey}
-                          onChange={(e) => updateConfig({ apiKey: e.target.value })}
-                        />
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                          Your API key is used to connect to the AI service. It will not be shared or stored unless you
-                          enable "Remember Settings".
-                        </p>
-                      </div>
+                      )}
 
                       <div className="pt-4">
                         <Button
                           onClick={handleTestConnection}
-                          disabled={isLoading || !config.apiKey}
+                          disabled={isLoading || (config.provider === "flowise" ? (!config.flowiseEndpoint || !config.flowiseChatflowId) : !config.apiKey)}
                           className="bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white rounded-2xl h-12 px-8 font-semibold shadow-sleek hover:shadow-sleek-lg"
                         >
                           {isLoading ? (
