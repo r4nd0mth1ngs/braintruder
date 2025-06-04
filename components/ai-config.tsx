@@ -308,6 +308,29 @@ export default function AIConfig({ open, onOpenChange }: AIConfigProps) {
                                 onChange={(e) => updateConfig({ flowiseChatflowId: e.target.value })}
                               />
                             </div>
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
+                                <Label htmlFor="flowise-api-key" className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                                  API Key
+                                </Label>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 rounded-xl"
+                                  onClick={() => setShowApiKey(!showApiKey)}
+                                >
+                                  {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </Button>
+                              </div>
+                              <Input
+                                id="flowise-api-key"
+                                type={showApiKey ? "text" : "password"}
+                                placeholder="Enter your Flowise API key"
+                                className="bg-white/60 dark:bg-slate-800/60 border-slate-200/60 dark:border-slate-700/60 rounded-2xl h-12"
+                                value={config.apiKey}
+                                onChange={(e) => updateConfig({ apiKey: e.target.value })}
+                              />
+                            </div>
                           </div>
                         ) : (
                           <Select

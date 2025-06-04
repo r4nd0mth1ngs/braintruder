@@ -3,6 +3,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const { Client } = require('ssh2');
 const cors = require('cors');
+const fetch = require('node-fetch');
 
 const app = express();
 app.use(cors());
@@ -90,6 +91,78 @@ wss.on('connection', (ws) => {
       if (data.type === 'ping') {
         heartbeat(ws);
         ws.send(JSON.stringify({ type: 'pong' }));
+        return;
+      }
+
+      if (data.type === 'start_pentest') {
+        console.log('\n=== Starting Pentest ===');
+        console.log('Target:', data.target);
+        console.log('Mode:', data.headlessMode ? 'Autonomous' : 'Manual');
+        console.log('AI Config:', data.ai);
+
+        // Send acknowledgment
+        ws.send(JSON.stringify({
+          type: 'system',
+          content: `Starting ${data.headlessMode ? 'autonomous' : 'manual'} pentest on ${data.target}`
+        }));
+
+        // Prepare the question for Flowise
+        let question = `Starting pentest on ${data.target}. Additional info: ${data.additionalInfo || 'None'}. `;
+        
+        if (data.headlessMode) {
+          question += 'This is an autonomous pentest. Please analyze the target and suggest appropriate tools and techniques. ';
+        } else {
+          question += `Tools selected: ${data.tools.join(', ')}. `;
+        }
+        
+        question += `System prompt: ${data.ai.systemPrompt.systemPrompt}`;
+
+        // Make request to Flowise
+        fetch(`${data.ai.flowiseEndpoint}/api/v1/prediction/${data.ai.flowiseChatflowId}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ question })
+        })
+        .then(response => response.json())
+        .then(data => {
+          console.log('Flowise response:', data);
+          
+          // Extract JSON response from the text, ignoring thinking process
+          let jsonResponse = null;
+          const jsonMatch = data.text.match(/```json\n([\s\S]*?)\n```/);
+          if (jsonMatch) {
+            try {
+              jsonResponse = JSON.parse(jsonMatch[1]);
+            } catch (e) {
+              console.error('Failed to parse JSON response:', e);
+            }
+          }
+
+          if (jsonResponse) {
+            // Send the command to the client
+            ws.send(JSON.stringify({
+              type: 'command',
+              command: jsonResponse.command,
+              description: jsonResponse.description
+            }));
+          } else {
+            // If no valid JSON found, send error
+            ws.send(JSON.stringify({
+              type: 'error',
+              content: 'Invalid response format from AI'
+            }));
+          }
+        })
+        .catch(error => {
+          console.error('Error calling Flowise:', error);
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: `Failed to get AI response: ${error.message}`
+          }));
+        });
+
         return;
       }
 

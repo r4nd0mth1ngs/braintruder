@@ -186,6 +186,7 @@ export function AIProvider({ children }: { children: ReactNode }) {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            "Authorization": `Bearer ${config.apiKey}`,
           },
           body: JSON.stringify({ question: "Test connection" }),
         })
