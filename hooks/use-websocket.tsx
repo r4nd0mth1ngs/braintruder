@@ -118,6 +118,16 @@ export function useWebSocket({
       socket.onmessage = (event) => {
         try {
           const parsedData = JSON.parse(event.data)
+
+          // Automatically respond to ping messages to keep the connection alive
+          if (parsedData?.type === "ping") {
+            socket.send(JSON.stringify({ type: "pong" }))
+            // Update last received data for consumers if needed
+            setData(parsedData)
+            if (onMessage) onMessage(event)
+            return
+          }
+
           setData(parsedData)
           if (onMessage) onMessage(event)
         } catch (error) {
