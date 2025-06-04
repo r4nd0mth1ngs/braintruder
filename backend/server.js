@@ -27,9 +27,18 @@ const wss = new WebSocket.Server({
   heartbeatInterval: 30000
 });
 
-const consoleWss = new WebSocket.Server({ 
+const consoleWss = new WebSocket.Server({
   server,
   path: "/ws/console",
+  clientTracking: true,
+  perMessageDeflate: false,
+  heartbeatInterval: 30000
+});
+
+// WebSocket server for interactive SSH shell sessions
+const sshWss = new WebSocket.Server({
+  server,
+  path: "/ws/ssh",
   clientTracking: true,
   perMessageDeflate: false,
   heartbeatInterval: 30000
@@ -50,6 +59,8 @@ const CLIENT_TIMEOUT = 35000;
 const sshConnectionsByClient = new Map();
 const activeWebSockets = new Set();
 const activeConsoleWebSockets = new Set();
+const activeShellWebSockets = new Set();
+const sshShellSessions = new Map();
 
 function heartbeat(ws) {
   ws.isAlive = true;
@@ -381,6 +392,125 @@ consoleWss.on('connection', (ws) => {
   });
 });
 
+// Handle interactive SSH shell WebSocket connections
+sshWss.on('connection', (ws) => {
+  console.log('\n=== New SSH Shell WebSocket Connection ===');
+  activeShellWebSockets.add(ws);
+  ws.isAlive = true;
+
+  ws.send(JSON.stringify({ type: 'system', content: 'Connected to SSH shell server' }));
+
+  ws.on('pong', () => {
+    heartbeat(ws);
+  });
+
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+
+      if (data.type === 'ping') {
+        heartbeat(ws);
+        ws.send(JSON.stringify({ type: 'pong' }));
+        return;
+      }
+
+      if (data.type === 'connect') {
+        const { connection } = data;
+
+        const config = {
+          host: connection.host,
+          port: connection.port,
+          username: connection.username,
+          readyTimeout: 20000,
+          keepaliveInterval: 10000,
+        };
+
+        if (connection.useSshKey) {
+          config.privateKey = connection.sshKey;
+        } else {
+          config.password = connection.password;
+        }
+
+        const sshClient = new Client();
+
+        sshClient.on('ready', () => {
+          sshClient.shell((err, stream) => {
+            if (err) {
+              ws.send(JSON.stringify({ type: 'error', message: err.message }));
+              sshClient.end();
+              return;
+            }
+
+            sshShellSessions.set(ws, { client: sshClient, stream });
+            ws.send(JSON.stringify({ type: 'system', content: 'SSH shell ready' }));
+
+            stream.on('data', (d) => {
+              ws.send(JSON.stringify({ type: 'output', content: d.toString() }));
+            });
+
+            stream.on('close', () => {
+              ws.send(JSON.stringify({ type: 'system', content: 'Shell closed' }));
+              sshClient.end();
+            });
+          });
+        });
+
+        sshClient.on('error', (err) => {
+          ws.send(JSON.stringify({ type: 'error', message: err.message }));
+        });
+
+        sshClient.on('close', () => {
+          sshShellSessions.delete(ws);
+        });
+
+        sshClient.connect(config);
+        return;
+      }
+
+      if (data.type === 'input') {
+        const session = sshShellSessions.get(ws);
+        if (session && session.stream) {
+          session.stream.write(data.content);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'SSH shell not ready' }));
+        }
+        return;
+      }
+
+      if (data.type === 'disconnect') {
+        const session = sshShellSessions.get(ws);
+        if (session) {
+          session.client.end();
+          sshShellSessions.delete(ws);
+        }
+        ws.close();
+        return;
+      }
+    } catch (err) {
+      ws.send(JSON.stringify({ type: 'error', message: err.message }));
+    }
+  });
+
+  ws.on('close', () => {
+    activeShellWebSockets.delete(ws);
+    const session = sshShellSessions.get(ws);
+    if (session) {
+      session.client.end();
+      sshShellSessions.delete(ws);
+    }
+  });
+
+  ws.on('error', (error) => {
+    activeShellWebSockets.delete(ws);
+    const session = sshShellSessions.get(ws);
+    if (session) {
+      session.client.end();
+      sshShellSessions.delete(ws);
+    }
+    console.error('SSH shell WS error:', error.message);
+  });
+});
+
 // Set up heartbeat interval for both WebSocket servers
 const interval = setInterval(() => {
   const now = Date.now();
@@ -404,7 +534,19 @@ const interval = setInterval(() => {
       ws.terminate();
       return;
     }
-    
+
+    ws.isAlive = false;
+    ws.send(JSON.stringify({ type: 'ping' }));
+  });
+
+  // Check SSH shell WebSocket connections
+  sshWss.clients.forEach((ws) => {
+    if (!ws.isAlive || (now - ws.lastPing > CLIENT_TIMEOUT)) {
+      console.log('SSH shell WebSocket client connection timed out, terminating...');
+      ws.terminate();
+      return;
+    }
+
     ws.isAlive = false;
     ws.send(JSON.stringify({ type: 'ping' }));
   });
@@ -419,11 +561,16 @@ consoleWss.on('close', () => {
   clearInterval(interval);
 });
 
+sshWss.on('close', () => {
+  clearInterval(interval);
+});
+
 // Keep track of active connections
 setInterval(() => {
   console.log('\n=== Connection Status ===');
   console.log('Active Main WebSocket connections:', activeWebSockets.size);
   console.log('Active Console WebSocket connections:', activeConsoleWebSockets.size);
+  console.log('Active SSH shell connections:', activeShellWebSockets.size);
   console.log('Active SSH connections:', sshConnections.size);
 }, 30000);
 
@@ -433,6 +580,7 @@ server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Main WebSocket endpoint: ws://localhost:${PORT}/ws`);
   console.log(`Console WebSocket endpoint: ws://localhost:${PORT}/ws/console`);
+  console.log(`SSH Shell endpoint: ws://localhost:${PORT}/ws/ssh`);
 });
 
 function executeCommand(sshClient, commandToExecute, ws, connectionId) {
