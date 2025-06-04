@@ -5,11 +5,31 @@ const { Client } = require('ssh2');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:3001',
+    'http://127.0.0.1:3001'
+  ],
+  methods: ['GET', 'POST'],
+  credentials: true
+}));
 
 const server = http.createServer(app);
+
+// Create WebSocket servers for different paths
 const wss = new WebSocket.Server({ 
   server,
+  path: "/ws",
+  clientTracking: true,
+  perMessageDeflate: false,
+  heartbeatInterval: 30000
+});
+
+const consoleWss = new WebSocket.Server({ 
+  server,
+  path: "/ws/console",
   clientTracking: true,
   perMessageDeflate: false,
   heartbeatInterval: 30000
@@ -20,6 +40,7 @@ const sshConnections = new Map();
 
 // Keep track of active WebSocket connections
 const wsConnections = new Set();
+const consoleWsConnections = new Set();
 
 // Heartbeat interval for all connections
 const HEARTBEAT_INTERVAL = 30000;
@@ -28,6 +49,7 @@ const CLIENT_TIMEOUT = 35000;
 // Store active SSH connections per WebSocket client
 const sshConnectionsByClient = new Map();
 const activeWebSockets = new Set();
+const activeConsoleWebSockets = new Set();
 
 function heartbeat(ws) {
   ws.isAlive = true;
@@ -59,8 +81,9 @@ function testSSHConnection(config, ws, connectionId) {
   });
 }
 
+// Handle main WebSocket connections
 wss.on('connection', (ws) => {
-  console.log('\n=== New WebSocket Connection ===');
+  console.log('\n=== New Main WebSocket Connection ===');
   activeWebSockets.add(ws);
   ws.isAlive = true;
   // Initialize a new Map for this client's SSH connections if it doesn't exist
@@ -82,7 +105,7 @@ wss.on('connection', (ws) => {
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
-      console.log('\n=== Received Message ===');
+      console.log('\n=== Received Main WebSocket Message ===');
       console.log('Message type:', data.type);
       console.log('Full message:', JSON.stringify(data, null, 2));
 
@@ -192,14 +215,15 @@ wss.on('connection', (ws) => {
           });
       }
     } catch (error) {
-      console.error('\n=== Error Processing Message ===');
+      console.error('\n=== Error Processing Main WebSocket Message ===');
       console.error('Error:', error.message);
       ws.send(JSON.stringify({ type: 'error', message: error.message }));
     }
   });
 
-  ws.on('close', () => {
-    console.log('\n=== WebSocket Connection Closed ===');
+  ws.on('close', (code, reason) => {
+    console.log('Main WebSocket closed:', code, reason.toString());
+    console.log('\n=== Main WebSocket Connection Closed ===');
     activeWebSockets.delete(ws);
     // Clean up all SSH connections associated with this client
     const clientSshConnections = sshConnectionsByClient.get(ws);
@@ -215,7 +239,7 @@ wss.on('connection', (ws) => {
 
   // Handle errors
   ws.on('error', (error) => {
-    console.error('\n=== WebSocket Error ===');
+    console.error('\n=== Main WebSocket Error ===');
     console.error('Error:', error.message);
     activeWebSockets.delete(ws);
     
@@ -230,12 +254,153 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Set up heartbeat interval
+// Handle console WebSocket connections
+consoleWss.on('connection', (ws) => {
+  console.log('\n=== New Console WebSocket Connection ===');
+  activeConsoleWebSockets.add(ws);
+  ws.isAlive = true;
+
+  // Send initial connection success message
+  ws.send(JSON.stringify({
+    type: 'system',
+    content: 'Connected to console server'
+  }));
+
+  // Set up ping-pong
+  ws.on('pong', () => {
+    heartbeat(ws);
+  });
+
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      console.log('\n=== Received Console WebSocket Message ===');
+      console.log('Message type:', data.type);
+      console.log('Full message:', JSON.stringify(data, null, 2));
+
+      // Handle ping messages
+      if (data.type === 'ping') {
+        heartbeat(ws);
+        ws.send(JSON.stringify({ type: 'pong' }));
+        return;
+      }
+
+      if (data.type === 'command') {
+        const { command, connection } = data;
+        const connectionId = `${connection.host}:${connection.port}:${connection.username}`;
+        
+        console.log('\n=== Processing Console Command ===');
+        console.log('Command:', command);
+        console.log('Target:', connectionId);
+        console.log('Connection details:', {
+          host: connection.host,
+          port: connection.port,
+          username: connection.username,
+          useSshKey: connection.useSshKey
+        });
+
+        // Check if an SSH connection for this ID already exists
+        if (sshConnections.has(connectionId)) {
+          const existingClient = sshConnections.get(connectionId);
+          console.log('=== Reusing Existing SSH Connection ===', connectionId);
+          executeCommand(existingClient, command, ws, connectionId);
+          return;
+        }
+
+        console.log('=== Creating New SSH Connection ===');
+        const sshClient = new Client();
+
+        // Connect to SSH server
+        const config = {
+          host: connection.host,
+          port: connection.port,
+          username: connection.username,
+          readyTimeout: 20000,
+          keepaliveInterval: 10000
+        };
+
+        if (connection.useSshKey) {
+          console.log('Authentication: Using SSH key');
+          config.privateKey = connection.sshKey;
+        } else {
+          console.log('Authentication: Using password');
+          config.password = connection.password;
+        }
+
+        // First test the connection and get the client if successful
+        testSSHConnection(config, ws, connectionId)
+          .then((newlyConnectedClient) => {
+            console.log('\n=== Connection Test Succeeded, Obtained SSH Client ===');
+            
+            // Store this newly connected and tested client
+            sshConnections.set(connectionId, newlyConnectedClient);
+            console.log(`Stored new SSH client for ${connectionId}`);
+
+            // Set up persistent error and close handlers for this stored client
+            newlyConnectedClient.on('error', (err) => {
+              console.error(`=== Stored SSH Client Error (${connectionId}) ===`);
+              console.error(err.message);
+              ws.send(JSON.stringify({ type: 'error', message: `SSH connection error for ${connectionId}: ${err.message}` }));
+              sshConnections.delete(connectionId);
+              console.log(`Removed SSH client ${connectionId} due to error.`);
+              newlyConnectedClient.end(); // Ensure it's ended
+            });
+      
+            newlyConnectedClient.on('close', () => {
+              console.log(`=== Stored SSH Client Closed (${connectionId}) ===`);
+              sshConnections.delete(connectionId);
+              console.log(`Removed SSH client ${connectionId} due to close event.`);
+            });
+            
+            // Now execute the command with the newly stored client
+            executeCommand(newlyConnectedClient, command, ws, connectionId);
+          })
+          .catch((err) => {
+            console.error('\n=== Connection Test Promise Rejected ===');
+            console.error('Error:', err.message);
+          });
+      }
+    } catch (error) {
+      console.error('\n=== Error Processing Console WebSocket Message ===');
+      console.error('Error:', error.message);
+      ws.send(JSON.stringify({ type: 'error', message: error.message }));
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    console.log('Console WebSocket closed:', code, reason.toString());
+    console.log('\n=== Console WebSocket Connection Closed ===');
+    activeConsoleWebSockets.delete(ws);
+  });
+
+  // Handle errors
+  ws.on('error', (error) => {
+    console.error('\n=== Console WebSocket Error ===');
+    console.error('Error:', error.message);
+    activeConsoleWebSockets.delete(ws);
+  });
+});
+
+// Set up heartbeat interval for both WebSocket servers
 const interval = setInterval(() => {
   const now = Date.now();
+  
+  // Check main WebSocket connections
   wss.clients.forEach((ws) => {
     if (!ws.isAlive || (now - ws.lastPing > CLIENT_TIMEOUT)) {
-      console.log('Client connection timed out, terminating...');
+      console.log('Main WebSocket client connection timed out, terminating...');
+      ws.terminate();
+      return;
+    }
+    
+    ws.isAlive = false;
+    ws.send(JSON.stringify({ type: 'ping' }));
+  });
+
+  // Check console WebSocket connections
+  consoleWss.clients.forEach((ws) => {
+    if (!ws.isAlive || (now - ws.lastPing > CLIENT_TIMEOUT)) {
+      console.log('Console WebSocket client connection timed out, terminating...');
       ws.terminate();
       return;
     }
@@ -245,8 +410,29 @@ const interval = setInterval(() => {
   });
 }, HEARTBEAT_INTERVAL);
 
+// Clean up on server close
 wss.on('close', () => {
   clearInterval(interval);
+});
+
+consoleWss.on('close', () => {
+  clearInterval(interval);
+});
+
+// Keep track of active connections
+setInterval(() => {
+  console.log('\n=== Connection Status ===');
+  console.log('Active Main WebSocket connections:', activeWebSockets.size);
+  console.log('Active Console WebSocket connections:', activeConsoleWebSockets.size);
+  console.log('Active SSH connections:', sshConnections.size);
+}, 30000);
+
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+  console.log(`\n=== Server Started ===`);
+  console.log(`Server is running on port ${PORT}`);
+  console.log(`Main WebSocket endpoint: ws://localhost:${PORT}/ws`);
+  console.log(`Console WebSocket endpoint: ws://localhost:${PORT}/ws/console`);
 });
 
 function executeCommand(sshClient, commandToExecute, ws, connectionId) {
@@ -310,17 +496,4 @@ function executeCommand(sshClient, commandToExecute, ws, connectionId) {
       ws.send(JSON.stringify({ type: 'error', content: errorStr }));
     });
   });
-}
-
-// Keep track of active connections
-setInterval(() => {
-  console.log('\n=== Connection Status ===');
-  console.log('Active WebSocket connections:', wsConnections.size);
-  console.log('Active SSH connections:', sshConnections.size);
-}, 30000);
-
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => {
-  console.log(`\n=== Server Started ===`);
-  console.log(`Server is running on port ${PORT}`);
-}); 
+} 
