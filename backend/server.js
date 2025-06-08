@@ -140,15 +140,71 @@ wss.on('connection', (ws) => {
             }
           }
 
-          if (jsonResponse) {
-            // Send the command to the client
+          if (jsonResponse && jsonResponse.command) {
+            // Send the command to the client to execute
             ws.send(JSON.stringify({
               type: 'command',
               command: jsonResponse.command,
-              description: jsonResponse.description
+              description: jsonResponse.description || 'Executing command'
             }));
+
+            // Set up a listener for command output
+            ws.on('message', (message) => {
+              try {
+                const data = JSON.parse(message);
+                if (data.type === 'command_output') {
+                  // Send command output back to Flowise for next steps
+                  const followUpQuestion = `Command "${jsonResponse.command}" was executed. Here is the output:\n${data.output}\n\nBased on this output, what should be the next step in the penetration test?`;
+                  
+                  fetch(`${data.ai.flowiseEndpoint}/api/v1/prediction/${data.ai.flowiseChatflowId}`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ question: followUpQuestion })
+                  })
+                  .then(response => response.json())
+                  .then(data => {
+                    console.log('Flowise follow-up response:', data);
+                    
+                    // Extract JSON response from the text, ignoring thinking process
+                    let followUpJson = null;
+                    const followUpMatch = data.text.match(/```json\n([\s\S]*?)\n```/);
+                    if (followUpMatch) {
+                      try {
+                        followUpJson = JSON.parse(followUpMatch[1]);
+                      } catch (e) {
+                        console.error('Failed to parse follow-up JSON response:', e);
+                      }
+                    }
+
+                    if (followUpJson && followUpJson.command) {
+                      // Send the next command to the client
+                      ws.send(JSON.stringify({
+                        type: 'command',
+                        command: followUpJson.command,
+                        description: followUpJson.description || 'Executing next command'
+                      }));
+                    } else {
+                      ws.send(JSON.stringify({
+                        type: 'system',
+                        content: 'AI has completed its analysis. No further commands suggested.'
+                      }));
+                    }
+                  })
+                  .catch(error => {
+                    console.error('Flowise follow-up request failed:', error);
+                    ws.send(JSON.stringify({
+                      type: 'error',
+                      content: 'Failed to get next steps from AI'
+                    }));
+                  });
+                }
+              } catch (e) {
+                console.error('Failed to parse command output message:', e);
+              }
+            });
           } else {
-            // If no valid JSON found, send error
             ws.send(JSON.stringify({
               type: 'error',
               content: 'Invalid response format from AI'
@@ -156,10 +212,10 @@ wss.on('connection', (ws) => {
           }
         })
         .catch(error => {
-          console.error('Error calling Flowise:', error);
+          console.error('Flowise request failed:', error);
           ws.send(JSON.stringify({
             type: 'error',
-            message: `Failed to get AI response: ${error.message}`
+            content: 'Failed to communicate with AI'
           }));
         });
 
