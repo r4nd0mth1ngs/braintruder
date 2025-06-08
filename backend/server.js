@@ -82,7 +82,7 @@ wss.on('connection', (ws) => {
     heartbeat(ws);
   });
 
-  ws.on('message', (message) => {
+  ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message);
       console.log('\n=== Received Message ===');
@@ -333,12 +333,18 @@ wss.on('connection', (ws) => {
 
         // Check if an SSH connection for this ID already exists for this client
         const clientSshConnections = sshConnectionsByClient.get(ws);
-        if (clientSshConnections.has(connectionId)) {
-          const existingClient = clientSshConnections.get(connectionId);
-          // TODO: Check if existingClient is still valid/ready
-          // For now, assume it is and try to execute the command
+        if (clientSshConnections && clientSshConnections.has(connectionId)) {
           console.log('=== Reusing Existing SSH Connection ===', connectionId);
-          executeCommand(existingClient, command, ws, connectionId);
+          const existingClient = clientSshConnections.get(connectionId);
+          // If we have a shell stream, write to it
+          if (existingClient.shellStream) {
+            console.log('Writing to existing shell stream');
+            existingClient.shellStream.write(command + '\n');
+            return;
+          }
+          // Otherwise, create a new shell
+          console.log('Creating new shell session for existing connection');
+          createShellSession(existingClient, ws, connectionId);
           return;
         }
 
@@ -367,7 +373,7 @@ wss.on('connection', (ws) => {
           .then((newlyConnectedClient) => {
             console.log('\n=== Connection Test Succeeded, Obtained SSH Client ===');
             
-            // At this point, newlyConnectedClient is the ready SSH client from testSSHConnection
+            // Store this newly connected and tested client
             const clientSshConnections = sshConnectionsByClient.get(ws);
             if (!clientSshConnections) {
                 console.error("Critical: clientSshConnections Map missing for this WebSocket. Aborting.");
@@ -376,11 +382,10 @@ wss.on('connection', (ws) => {
                 return;
             }
 
-            // Store this newly connected and tested client
             clientSshConnections.set(connectionId, newlyConnectedClient);
             console.log(`Stored new SSH client for ${connectionId}`);
 
-            // Set up persistent error and close handlers for this stored client
+            // Set up persistent error and close handlers
             newlyConnectedClient.on('error', (err) => {
               console.error(`=== Stored SSH Client Error (${connectionId}) ===`);
               console.error(err.message);
@@ -390,7 +395,7 @@ wss.on('connection', (ws) => {
                 currentClientSshMap.delete(connectionId);
                 console.log(`Removed SSH client ${connectionId} due to error.`);
               }
-              newlyConnectedClient.end(); // Ensure it's ended
+              newlyConnectedClient.end();
             });
       
             newlyConnectedClient.on('close', () => {
@@ -402,17 +407,13 @@ wss.on('connection', (ws) => {
               }
             });
             
-            // Now execute the command with the newly stored client
-            executeCommand(newlyConnectedClient, command, ws, connectionId);
+            // Create a shell session
+            console.log('Creating new shell session');
+            createShellSession(newlyConnectedClient, ws, connectionId);
           })
           .catch((err) => {
             console.error('\n=== Connection Test Promise Rejected ===');
             console.error('Error:', err.message);
-            // Error already sent to client by testSSHConnection or other error handlers
-            // ws.send(JSON.stringify({ 
-            //   type: 'error', 
-            //   message: `SSH connection failed: ${err.message}. Please ensure SSH server is running on the target machine.` 
-            // }));
           });
       }
     } catch (error) {
@@ -469,65 +470,120 @@ wss.on('close', () => {
   clearInterval(interval);
 });
 
-function executeCommand(sshClient, commandToExecute, ws, connectionId) {
-  if (!sshClient || !sshClient._sock || !sshClient._sock.writable) { // Check if client or its socket is not usable
-    console.error(`SSH client for ${connectionId} is not ready or already closed.`);
-    ws.send(JSON.stringify({ type: 'error', message: `SSH connection for ${connectionId} is not active. Please try reconnecting.` }));
-    
-    // Attempt to remove this broken client from the map
-    const clientSshConnections = sshConnectionsByClient.get(ws);
-    if (clientSshConnections) {
-        clientSshConnections.delete(connectionId);
-    }
-    return;
-  }
-
-  console.log(`Executing command on ${connectionId}: ${commandToExecute}`);
+// Function to execute a command via SSH
+async function executeCommand(command, connection) {
+  console.log('Executing command:', command);
+  console.log('Connection details:', connection);
   
-  sshClient.exec(commandToExecute, (err, stream) => {
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    
+    conn.on('ready', () => {
+      console.log('SSH connection ready');
+      conn.exec(command, (err, stream) => {
+        if (err) {
+          console.error('Error executing command:', err);
+          reject(err);
+          return;
+        }
+        
+        let output = '';
+        stream.on('data', (data) => {
+          const chunk = data.toString();
+          console.log('Command output chunk:', chunk);
+          output += chunk;
+        });
+        
+        stream.on('close', () => {
+          console.log('Command execution complete');
+          console.log('Full command output:', output);
+          conn.end();
+          resolve(output);
+        });
+        
+        stream.on('error', (err) => {
+          console.error('Stream error:', err);
+          conn.end();
+          reject(err);
+        });
+      });
+    });
+    
+    conn.on('error', (err) => {
+      console.error('SSH connection error:', err);
+      reject(err);
+    });
+    
+    // Connect to the SSH server
+    const config = {
+      host: connection.host,
+      port: connection.port,
+      username: connection.username,
+      password: connection.password,
+      readyTimeout: 20000,
+      keepaliveInterval: 10000
+    };
+    
+    console.log('Connecting to SSH server with config:', {
+      ...config,
+      password: config.password ? '******' : undefined
+    });
+    
+    conn.connect(config);
+  });
+}
+
+function createShellSession(sshClient, ws, connectionId) {
+  sshClient.shell({ term: 'xterm-256color', cols: 80, rows: 24 }, (err, stream) => {
     if (err) {
-      console.error('✗ Command execution failed:', err.message);
-      ws.send(JSON.stringify({ type: 'error', message: err.message }));
+      console.error('Error creating shell session:', err.message);
+      ws.send(JSON.stringify({ type: 'error', message: `Failed to create shell session: ${err.message}` }));
       return;
     }
 
-    let output = '';
+    // Store the shell stream
+    sshClient.shellStream = stream;
 
+    // Handle shell output
     stream.on('data', (data) => {
       const dataStr = data.toString();
-      console.log('Command output:', dataStr);
-      output += dataStr;
-      // Send each chunk of output immediately
+      console.log('Shell output:', dataStr);
       ws.send(JSON.stringify({ 
         type: 'output', 
-        content: dataStr 
+        content: dataStr.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
       }));
     });
 
-    stream.on('close', (code, signal) => {
-      console.log('\n=== Command Execution Completed ===');
-      console.log('Exit code:', code);
-      console.log('Signal:', signal);
-      console.log('Full output:', output);
-      
-      // Send completion message
-      ws.send(JSON.stringify({ 
-        type: 'system', 
-        content: `Command completed with exit code: ${code}` 
-      }));
-    });
-
-    stream.on('error', (err) => {
-      console.error('\n=== Stream Error ===');
-      console.error('Error:', err.message);
-      ws.send(JSON.stringify({ type: 'error', message: err.message }));
-    });
-
+    // Handle shell errors
     stream.stderr.on('data', (data) => {
       const errorStr = data.toString();
-      console.error('\n=== Command Error Output ===');
-      console.error('Error:', errorStr);
-      ws.send(JSON.stringify({ type: 'error', content: errorStr }));
+      console.error('Shell error:', errorStr);
+      ws.send(JSON.stringify({ 
+        type: 'error', 
+        content: errorStr.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      }));
+    });
+
+    // Handle shell close
+    stream.on('close', () => {
+      console.log('Shell session closed');
+      ws.send(JSON.stringify({ 
+        type: 'system', 
+        content: 'Shell session closed\n'
+      }));
+      delete sshClient.shellStream;
+    });
+
+    // Handle terminal resize
+    ws.on('message', (message) => {
+      try {
+        const data = JSON.parse(message);
+        if (data.type === 'resize') {
+          stream.setWindow(data.rows, data.cols, 0, 0);
+        }
+      } catch (e) {
+        // Ignore non-JSON messages
+      }
     });
   });
 }
