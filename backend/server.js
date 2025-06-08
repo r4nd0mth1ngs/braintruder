@@ -23,16 +23,17 @@ const sshConnections = new Map();
 const wsConnections = new Set();
 
 // Heartbeat interval for all connections
-const HEARTBEAT_INTERVAL = 30000;
-const CLIENT_TIMEOUT = 35000;
+const HEARTBEAT_INTERVAL = 15000;  // Send ping every 15 seconds
 
 // Store active SSH connections per WebSocket client
 const sshConnectionsByClient = new Map();
 const activeWebSockets = new Set();
 
 function heartbeat(ws) {
-  ws.isAlive = true;
-  ws.lastPing = Date.now();
+  // Just send a ping to keep the connection alive
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'ping' }));
+  }
 }
 
 function testSSHConnection(config, ws, connectionId) {
@@ -63,6 +64,7 @@ function testSSHConnection(config, ws, connectionId) {
 wss.on('connection', (ws) => {
   console.log('\n=== New WebSocket Connection ===');
   activeWebSockets.add(ws);
+  wsConnections.add(ws);  // Add to wsConnections set
   ws.isAlive = true;
   // Initialize a new Map for this client's SSH connections if it doesn't exist
   if (!sshConnectionsByClient.has(ws)) {
@@ -100,123 +102,216 @@ wss.on('connection', (ws) => {
         console.log('Mode:', data.headlessMode ? 'Autonomous' : 'Manual');
         console.log('AI Config:', data.ai);
 
+        // Store pentest context for this WebSocket connection
+        const pentestContext = {
+          target: data.target,
+          mode: data.headlessMode ? 'Autonomous' : 'Manual',
+          aiConfig: data.ai,
+          commandHistory: [],
+          isActive: true
+        };
+        ws.pentestContext = pentestContext;
+
         // Send acknowledgment
         ws.send(JSON.stringify({
           type: 'system',
           content: `Starting ${data.headlessMode ? 'autonomous' : 'manual'} pentest on ${data.target}`
         }));
 
-        // Prepare the question for Flowise
-        let question = `Starting pentest on ${data.target}. Additional info: ${data.additionalInfo || 'None'}. `;
-        
-        if (data.headlessMode) {
-          question += 'This is an autonomous pentest. Please analyze the target and suggest appropriate tools and techniques. ';
-        } else {
-          question += `Tools selected: ${data.tools.join(', ')}. `;
-        }
-        
-        question += `System prompt: ${data.ai.systemPrompt.systemPrompt}`;
+        // Function to validate command
+        const validateCommand = (command) => {
+          // List of allowed commands/tools
+          const allowedCommands = [
+            'nmap', 'whois', 'dig', 'nikto', 'dirb', 'gobuster',
+            'sqlmap', 'hydra', 'medusa', 'metasploit', 'msfconsole',
+            'curl', 'wget', 'netcat', 'nc', 'telnet', 'ssh', 'ftp'
+          ];
 
-        // Make request to Flowise
-        fetch(`${data.ai.flowiseEndpoint}/api/v1/prediction/${data.ai.flowiseChatflowId}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ question })
-        })
-        .then(response => response.json())
-        .then(data => {
-          console.log('Flowise response:', data);
-          
-          // Extract JSON response from the text, ignoring thinking process
-          let jsonResponse = null;
-          const jsonMatch = data.text.match(/```json\n([\s\S]*?)\n```/);
-          if (jsonMatch) {
-            try {
-              jsonResponse = JSON.parse(jsonMatch[1]);
-            } catch (e) {
-              console.error('Failed to parse JSON response:', e);
-            }
+          // Check if command is empty or undefined
+          if (!command) {
+            return { valid: false, reason: 'Command is empty' };
           }
 
-          if (jsonResponse && jsonResponse.command) {
-            // Send the command to the client to execute
-            ws.send(JSON.stringify({
-              type: 'command',
-              command: jsonResponse.command,
-              description: jsonResponse.description || 'Executing command'
-            }));
+          // Check if command starts with any allowed tool
+          const commandLower = command.toLowerCase();
+          const isAllowed = allowedCommands.some(tool => commandLower.startsWith(tool));
+          
+          if (!isAllowed) {
+            return { 
+              valid: false, 
+              reason: `Command must start with one of: ${allowedCommands.join(', ')}` 
+            };
+          }
 
-            // Set up a listener for command output
-            ws.on('message', (message) => {
-              try {
-                const data = JSON.parse(message);
-                if (data.type === 'command_output') {
-                  // Send command output back to Flowise for next steps
-                  const followUpQuestion = `Command "${jsonResponse.command}" was executed. Here is the output:\n${data.output}\n\nBased on this output, what should be the next step in the penetration test?`;
-                  
-                  fetch(`${data.ai.flowiseEndpoint}/api/v1/prediction/${data.ai.flowiseChatflowId}`, {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ question: followUpQuestion })
-                  })
-                  .then(response => response.json())
-                  .then(data => {
-                    console.log('Flowise follow-up response:', data);
-                    
-                    // Extract JSON response from the text, ignoring thinking process
-                    let followUpJson = null;
-                    const followUpMatch = data.text.match(/```json\n([\s\S]*?)\n```/);
-                    if (followUpMatch) {
-                      try {
-                        followUpJson = JSON.parse(followUpMatch[1]);
-                      } catch (e) {
-                        console.error('Failed to parse follow-up JSON response:', e);
-                      }
-                    }
+          // Check for potentially dangerous commands
+          const dangerousPatterns = [
+            'rm -rf', 'mkfs', 'dd if=', '> /dev/sd',
+            'chmod -R 777', 'chown -R root:root'
+          ];
 
-                    if (followUpJson && followUpJson.command) {
-                      // Send the next command to the client
-                      ws.send(JSON.stringify({
-                        type: 'command',
-                        command: followUpJson.command,
-                        description: followUpJson.description || 'Executing next command'
-                      }));
-                    } else {
-                      ws.send(JSON.stringify({
-                        type: 'system',
-                        content: 'AI has completed its analysis. No further commands suggested.'
-                      }));
-                    }
-                  })
-                  .catch(error => {
-                    console.error('Flowise follow-up request failed:', error);
-                    ws.send(JSON.stringify({
-                      type: 'error',
-                      content: 'Failed to get next steps from AI'
-                    }));
-                  });
-                }
-              } catch (e) {
-                console.error('Failed to parse command output message:', e);
-              }
+          const isDangerous = dangerousPatterns.some(pattern => 
+            commandLower.includes(pattern)
+          );
+
+          if (isDangerous) {
+            return { 
+              valid: false, 
+              reason: 'Command contains potentially dangerous operations' 
+            };
+          }
+
+          return { valid: true };
+        };
+
+        // Function to handle AI communication
+        const handleAICommunication = async (question) => {
+          try {
+            const response = await fetch(`${data.ai.flowiseEndpoint}/api/v1/prediction/${data.ai.flowiseChatflowId}`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ question })
             });
-          } else {
+            
+            const aiResponse = await response.json();
+            console.log('Flowise response:', aiResponse);
+            
+            // Extract JSON response from the text, ignoring thinking process
+            let jsonResponse = null;
+            try {
+              // First try to parse the entire response as JSON
+              jsonResponse = JSON.parse(aiResponse.text);
+            } catch (e) {
+              // If that fails, try to extract JSON from code blocks or after <think> section
+              const jsonMatch = aiResponse.text.match(/(?:```json\n([\s\S]*?)\n```|<\/think>\n([\s\S]*))/);
+              if (jsonMatch) {
+                try {
+                  // Use either the code block content or the content after </think>
+                  const jsonContent = jsonMatch[1] || jsonMatch[2];
+                  jsonResponse = JSON.parse(jsonContent);
+                } catch (e) {
+                  console.error('Failed to parse JSON response:', e);
+                  ws.send(JSON.stringify({
+                    type: 'error',
+                    content: 'Invalid response format from AI'
+                  }));
+                  return;
+                }
+              }
+            }
+
+            if (jsonResponse && jsonResponse.command) {
+              console.log('Parsed AI command:', jsonResponse);
+              // Validate command
+              const validation = validateCommand(jsonResponse.command);
+              if (!validation.valid) {
+                console.log('Command validation failed:', validation.reason);
+                ws.send(JSON.stringify({
+                  type: 'error',
+                  content: `Command validation failed: ${validation.reason}`
+                }));
+                return;
+              }
+
+              // Add command to history
+              pentestContext.commandHistory.push({
+                command: jsonResponse.command,
+                timestamp: new Date().toISOString()
+              });
+
+              // Send command to frontend for execution
+              console.log('Sending command to frontend:', jsonResponse.command);
+              const commandMessage = JSON.stringify({
+                type: 'command',
+                command: jsonResponse.command,
+                connection: ws.pentestContext.connection
+              });
+              
+              // Check if WebSocket is still open
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(commandMessage);
+                console.log('Command sent successfully');
+              } else {
+                console.error('WebSocket connection lost');
+                throw new Error('WebSocket connection lost');
+              }
+            } else {
+              console.log('No command received from AI');
+              ws.send(JSON.stringify({
+                type: 'error',
+                content: 'No command received from AI'
+              }));
+            }
+          } catch (error) {
+            console.error('Flowise request failed:', error);
             ws.send(JSON.stringify({
               type: 'error',
-              content: 'Invalid response format from AI'
+              content: 'Failed to communicate with AI'
             }));
           }
-        })
-        .catch(error => {
-          console.error('Flowise request failed:', error);
-          ws.send(JSON.stringify({
-            type: 'error',
-            content: 'Failed to communicate with AI'
-          }));
+        };
+
+        // Set up ping interval to keep connection alive
+        const pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          } else {
+            clearInterval(pingInterval);
+          }
+        }, 30000); // Send ping every 30 seconds
+
+        // Clean up on connection close
+        ws.on('close', () => {
+          console.log('WebSocket connection closed, cleaning up...');
+          clearInterval(pingInterval);
+          if (ws.pentestContext) {
+            ws.pentestContext.isActive = false;
+          }
+        });
+
+        // Initial question to AI
+        const initialQuestion = `Starting pentest on ${data.target}. Additional info: ${data.additionalInfo || 'None'}. ` +
+          `This is an autonomous pentest. Please analyze the target and suggest appropriate tools and techniques. ` +
+          `System prompt: ${data.ai.systemPrompt.systemPrompt}`;
+
+        handleAICommunication(initialQuestion);
+
+        // Handle command output and stop command
+        ws.on('message', async (message) => {
+          try {
+            const messageData = JSON.parse(message);
+            
+            // Handle stop command
+            if (messageData.type === 'stop_pentest' && ws.pentestContext) {
+              ws.pentestContext.isActive = false;
+              ws.send(JSON.stringify({
+                type: 'system',
+                content: 'Pentest stopped by user'
+              }));
+              return;
+            }
+            
+            if (messageData.type === 'command_output' && ws.pentestContext && ws.pentestContext.isActive) {
+              const { command, output } = messageData;
+              
+              // Update command history with output
+              const lastCommand = ws.pentestContext.commandHistory[ws.pentestContext.commandHistory.length - 1];
+              if (lastCommand) {
+                lastCommand.output = output;
+              }
+
+              // Prepare follow-up question with context
+              const followUpQuestion = `Command "${command}" was executed. Here is the output:\n${output}\n\n` +
+                `Based on this output and the previous commands, what should be the next step in the penetration test? ` +
+                `Remember we are testing ${ws.pentestContext.target} and our goal is to identify security vulnerabilities.`;
+
+              // Get next command from AI
+              await handleAICommunication(followUpQuestion);
+            }
+          } catch (e) {
+            console.error('Failed to handle command output:', e);
+          }
         });
 
         return;
@@ -330,6 +425,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     console.log('\n=== WebSocket Connection Closed ===');
     activeWebSockets.delete(ws);
+    wsConnections.delete(ws);  // Remove from wsConnections set
     // Clean up all SSH connections associated with this client
     const clientSshConnections = sshConnectionsByClient.get(ws);
     if (clientSshConnections) {
@@ -347,6 +443,7 @@ wss.on('connection', (ws) => {
     console.error('\n=== WebSocket Error ===');
     console.error('Error:', error.message);
     activeWebSockets.delete(ws);
+    wsConnections.delete(ws);  // Remove from wsConnections set
     
     // Clean up SSH connections on error
     const clientSshConnections = sshConnectionsByClient.get(ws);
@@ -361,16 +458,10 @@ wss.on('connection', (ws) => {
 
 // Set up heartbeat interval
 const interval = setInterval(() => {
-  const now = Date.now();
   wss.clients.forEach((ws) => {
-    if (!ws.isAlive || (now - ws.lastPing > CLIENT_TIMEOUT)) {
-      console.log('Client connection timed out, terminating...');
-      ws.terminate();
-      return;
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ping' }));
     }
-    
-    ws.isAlive = false;
-    ws.send(JSON.stringify({ type: 'ping' }));
   });
 }, HEARTBEAT_INTERVAL);
 
