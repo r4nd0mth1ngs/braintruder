@@ -472,14 +472,20 @@ wss.on('close', () => {
 
 // Function to execute a command via SSH
 async function executeCommand(command, connection) {
-  console.log('Executing command:', command);
-  console.log('Connection details:', connection);
+  console.log('\n=== Command Execution ===');
+  console.log('Command:', command);
+  console.log('Connection details:', {
+    host: connection.host,
+    port: connection.port,
+    username: connection.username,
+    useSshKey: connection.useSshKey
+  });
   
   return new Promise((resolve, reject) => {
     const conn = new Client();
     
     conn.on('ready', () => {
-      console.log('SSH connection ready');
+      console.log('SSH connection ready, executing command...');
       conn.exec(command, (err, stream) => {
         if (err) {
           console.error('Error executing command:', err);
@@ -529,7 +535,12 @@ async function executeCommand(command, connection) {
       password: config.password ? '******' : undefined
     });
     
-    conn.connect(config);
+    try {
+      conn.connect(config);
+    } catch (error) {
+      console.error('Error connecting to SSH server:', error);
+      reject(error);
+    }
   });
 }
 
