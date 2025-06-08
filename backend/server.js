@@ -166,12 +166,23 @@ wss.on('connection', (ws) => {
         // Function to handle AI communication
         const handleAICommunication = async (question) => {
           try {
+            // Create a focused context object with only essential information
+            const focusedContext = {
+              target: ws.pentestContext.target,
+              mode: ws.pentestContext.mode,
+              lastCommand: ws.pentestContext.commandHistory[ws.pentestContext.commandHistory.length - 1],
+              systemPrompt: data.ai.systemPrompt.systemPrompt
+            };
+
             const response = await fetch(`${data.ai.flowiseEndpoint}/api/v1/prediction/${data.ai.flowiseChatflowId}`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
               },
-              body: JSON.stringify({ question })
+              body: JSON.stringify({ 
+                question,
+                context: focusedContext
+              })
             });
             
             const aiResponse = await response.json();
@@ -203,6 +214,18 @@ wss.on('connection', (ws) => {
 
             if (jsonResponse && jsonResponse.command) {
               console.log('Parsed AI command:', jsonResponse);
+              
+              // Check if command requires approval
+              if (jsonResponse.requires_approval) {
+                // Send approval request to frontend
+                ws.send(JSON.stringify({
+                  type: 'approval_request',
+                  command: jsonResponse.command,
+                  explanation: jsonResponse.explanation
+                }));
+                return;
+              }
+
               // Validate command
               const validation = validateCommand(jsonResponse.command);
               if (!validation.valid) {
@@ -214,9 +237,10 @@ wss.on('connection', (ws) => {
                 return;
               }
 
-              // Add command to history
-              pentestContext.commandHistory.push({
+              // Add command to history with explanation
+              ws.pentestContext.commandHistory.push({
                 command: jsonResponse.command,
+                explanation: jsonResponse.explanation,
                 timestamp: new Date().toISOString()
               });
 
@@ -225,6 +249,7 @@ wss.on('connection', (ws) => {
               const commandMessage = JSON.stringify({
                 type: 'command',
                 command: jsonResponse.command,
+                explanation: jsonResponse.explanation,
                 connection: ws.pentestContext.connection
               });
               
@@ -271,9 +296,7 @@ wss.on('connection', (ws) => {
         });
 
         // Initial question to AI
-        const initialQuestion = `Starting pentest on ${data.target}. Additional info: ${data.additionalInfo || 'None'}. ` +
-          `This is an autonomous pentest. Please analyze the target and suggest appropriate tools and techniques. ` +
-          `System prompt: ${data.ai.systemPrompt.systemPrompt}`;
+        const initialQuestion = `Starting pentest on ${data.target}. Mode: ${data.headlessMode ? 'Autonomous' : 'Manual'}. Additional info: ${data.additionalInfo || 'None'}. Please analyze the target and suggest appropriate tools and techniques.`;
 
         handleAICommunication(initialQuestion);
 

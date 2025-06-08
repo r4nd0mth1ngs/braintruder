@@ -46,7 +46,7 @@ const defaultPromptTemplates: PromptTemplate[] = [
     id: "default-pentest",
     name: "Standard Pentesting",
     description: "General-purpose pentesting prompt for most scenarios",
-    systemPrompt: `You are an AI security assistant helping with a penetration test on {{TARGET}}. 
+    systemPrompt: `You are an AI security assistant helping with a penetration test on {{TARGET}}.
 Your goal is to identify security vulnerabilities and suggest appropriate tools and techniques.
 
 Follow these guidelines:
@@ -56,6 +56,13 @@ Follow these guidelines:
 4. Request approval before suggesting potentially disruptive tests
 5. Focus on identifying real security issues, not theoretical ones
 6. Provide clear remediation advice for any vulnerabilities found
+
+IMPORTANT: Your response must include a JSON object with the following structure:
+{
+  "command": "the command to execute",
+  "explanation": "brief explanation of what the command does",
+  "requires_approval": true/false
+}
 
 Additional context: {{ADDITIONAL_INFO}}`,
     variables: ["TARGET", "ADDITIONAL_INFO"],
@@ -75,6 +82,13 @@ Follow these guidelines:
 4. Request approval before suggesting tests that might affect application functionality
 5. Provide clear remediation advice for any vulnerabilities found
 
+IMPORTANT: Your response must include a JSON object with the following structure:
+{
+  "command": "the command to execute",
+  "explanation": "brief explanation of what the command does",
+  "requires_approval": true/false
+}
+
 Additional context: {{ADDITIONAL_INFO}}`,
     variables: ["TARGET", "ADDITIONAL_INFO"],
     isDefault: true,
@@ -92,6 +106,13 @@ Follow these guidelines:
 3. Suggest appropriate network testing tools (nmap, Nessus, etc.)
 4. Request approval before suggesting tests that might disrupt network services
 5. Provide clear remediation advice for any vulnerabilities found
+
+IMPORTANT: Your response must include a JSON object with the following structure:
+{
+  "command": "the command to execute",
+  "explanation": "brief explanation of what the command does",
+  "requires_approval": true/false
+}
 
 Additional context: {{ADDITIONAL_INFO}}`,
     variables: ["TARGET", "ADDITIONAL_INFO"],
